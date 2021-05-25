@@ -1,3 +1,4 @@
+import datasets
 import json
 import numpy as np
 import random
@@ -14,16 +15,27 @@ from args import get_train_args
 from collections import OrderedDict
 from datasets import load_metric
 from datasets import load_dataset
+from datasets import Dataset
 from json import dumps
 from models import BiDAF
 from tensorboardX import SummaryWriter
+from transformers import AdamW
 from transformers import AutoTokenizer
 from transformers import AutoModelForQuestionAnswering
 from transformers import TrainingArguments
 from transformers import Trainer
 from tqdm import tqdm
+from torch.utils.data import DataLoader
 from ujson import load as json_load
 from util import collate_fn, SQuAD
+
+class SquadDataset(torch.utils.data.Dataset):
+        def __init__(self, encodings):
+            self.encodings = encodings      
+        def __getitem__(self, idx):
+            return {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
+        def __len__(self):
+            return len(self.encodings.input_ids)
 
 def read_squad(path):
     # open JSON file and load intro dictionary
@@ -74,7 +86,7 @@ def add_end_idx(answers, contexts):
                     answer['answer_start'] = start_idx - n
                     answer['answer_end'] = end_idx - n
 
-def add_token_positions(encodings, answers):
+def add_token_positions(encodings, answers, tokenizer):
     # initialize lists to contain the token indices of answer start/end
     start_positions = []
     end_positions = []
@@ -101,22 +113,22 @@ def preprocess(path):
 
     # and apply the function to our two answer lists
     add_end_idx(train_answers, train_contexts)
-    add_end_idx(val_answers, val_contexts)
+    add_end_idx(test_answers, test_contexts)
 
     tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased-distilled-squad")
     train_encodings = tokenizer(train_contexts, train_questions, truncation=True, padding=True)
     test_encodings = tokenizer(test_contexts, test_questions, truncation=True, padding=True)
 
     # apply function to our data
-    add_token_positions(train_encodings, train_answers)
-    add_token_positions(test_encodings, test_answers)
-    train_dataset = Dataset.from_dict(train_encodings)
-    test_dataset = Dataset.from_dict(test_encodings)
-    return train_dataset, test_dataset
+    add_token_positions(train_encodings, train_answers, tokenizer)
+    add_token_positions(test_encodings, test_answers, tokenizer)
+    train_dataset = SquadDataset(train_encodings)
+    test_dataset = SquadDataset(test_encodings)
+    return train_dataset, test_dataset, tokenizer
 
 def main(args):
-    path = '~/squad/data/'
-    train_dataset, test_dataset = preprocess(path)
+    path = './data/'
+    train_dataset, test_dataset, tokenizer = preprocess(path)
     args.save_dir = util.get_save_dir(args.save_dir, args.name, training=True)
     log = util.get_logger(args.save_dir, args.name)
     tbx = SummaryWriter(args.save_dir)
@@ -139,6 +151,7 @@ def main(args):
 
         ## setup GPU/CPU
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    print(device)
     # move model over to detected device
     model.to(device)
     # activate training mode of model
@@ -149,7 +162,7 @@ def main(args):
     # initialize data loader for training data
     train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
 
-    for epoch in range(30):
+    for epoch in range(3):
         # set model to train mode
         model.train()
         # setup loop (we use tqdm for the progress bar)
@@ -175,5 +188,9 @@ def main(args):
             # print relevant info to progress bar
             loop.set_description(f'Epoch {epoch}')
             loop.set_postfix(loss=loss.item())
+    model_path = "./custom"
+    model.save_pretrained(model_path)
+    tokenizer.save_pretrained(model_path)
 if __name__ == '__main__':
     main(get_train_args())
+
